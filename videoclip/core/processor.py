@@ -122,6 +122,30 @@ class VideoClipProcessor:
             )
             logger.info(f"✓ 视频裁剪完成，共生成 {len(clipped_results)} 个片段\n")
             
+            # 步骤 6: 烧制字幕到视频
+            step_num += 1
+            total_steps += 1
+            logger.info(f"[步骤 {step_num}/{total_steps}] 烧制字幕到视频...")
+            burned_count = 0
+            for result in clipped_results:
+                video_clip_path = result.get("video_path")
+                srt_path = result.get("subtitle_srt_path")
+                if video_clip_path and srt_path and Path(srt_path).exists():
+                    try:
+                        output_with_subtitle = str(Path(video_clip_path).with_stem(
+                            Path(video_clip_path).stem + "_with_subtitle"
+                        ))
+                        burned_path = self.video_clipper.burn_subtitle(
+                            video_path=video_clip_path,
+                            subtitle_path=srt_path,
+                            output_path=output_with_subtitle
+                        )
+                        result["burned_video_path"] = burned_path
+                        burned_count += 1
+                    except Exception as e:
+                        logger.warning(f"⚠ 烧制字幕失败: {Path(video_clip_path).name}, 错误: {e}")
+            logger.info(f"✓ 字幕烧制完成，共烧制 {burned_count} 个视频\n")
+            
             # 清理中间文件（可选）
             # 注意：字幕文件和精彩片段分析结果始终保留
             if not keep_intermediate:
@@ -157,6 +181,9 @@ class VideoClipProcessor:
             logger.info(f"    ⏱  时间: {result['start_time']:.2f}s - {result['end_time']:.2f}s ({result['duration']:.2f}s)")
             if result.get("text"):
                 logger.info(f"    📝 内容: {result['text'][:60]}...")
+            if result.get("burned_video_path"):
+                burned_name = Path(result["burned_video_path"]).name
+                logger.info(f"    🎬 烧制视频: {burned_name}")
             if result.get("subtitle_srt_path"):
                 srt_name = Path(result["subtitle_srt_path"]).name
                 logger.info(f"    📄 字幕: {srt_name} (SRT格式)")
