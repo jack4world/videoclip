@@ -513,4 +513,204 @@ class VideoClipper:
         
         logger.info(f"共成功裁剪 {len(clipped_results)} 个视频片段")
         return clipped_results
+    
+    def _get_chinese_font(self) -> str:
+        """
+        获取支持中文的字体名称（用于 fontconfig）
+        
+        Returns:
+            字体名称（fontconfig 可识别的名称）
+        """
+        import platform
+        import subprocess
+        
+        system = platform.system()
+        
+        # 优先使用的中文字体名称列表（按优先级排序）
+        if system == "Darwin":  # macOS
+            # macOS 上的中文字体名称（fontconfig 识别的名称）
+            font_candidates = [
+                "Heiti SC",              # 黑体-简（macOS 内置）
+                "Hiragino Sans GB",      # 冬青黑体简体中文
+                "STHeiti",               # 华文黑体
+                "PingFang SC",           # 苹方-简
+                "Arial Unicode MS",      # Arial Unicode
+            ]
+        elif system == "Windows":
+            # Windows 上的中文字体名称
+            font_candidates = [
+                "Microsoft YaHei",       # 微软雅黑
+                "SimHei",                # 黑体
+                "SimSun",                # 宋体
+                "KaiTi",                 # 楷体
+            ]
+        else:  # Linux
+            # Linux 上的中文字体名称
+            font_candidates = [
+                "WenQuanYi Micro Hei",   # 文泉驿微米黑
+                "WenQuanYi Zen Hei",     # 文泉驿正黑
+                "Noto Sans CJK SC",      # Noto Sans CJK 简体中文
+                "Droid Sans Fallback",   # Droid Sans Fallback
+            ]
+        
+        # 尝试使用 fc-list 检查字体是否可用
+        try:
+            result = subprocess.run(
+                ["fc-list", ":lang=zh", "family"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            available_fonts = result.stdout.lower()
+            
+            for font_name in font_candidates:
+                if font_name.lower() in available_fonts:
+                    logger.debug(f"使用中文字体: {font_name}")
+                    return font_name
+        except Exception as e:
+            logger.debug(f"检查字体时出错: {e}")
+        
+        # 如果没有找到，返回第一个候选字体（希望系统能找到）
+        default_font = font_candidates[0] if font_candidates else "Sans"
+        logger.warning(f"未能确认中文字体可用性，将使用: {default_font}")
+        return default_font
+    
+    def burn_subtitle(self, video_path: str, subtitle_path: str, 
+                     output_path: Optional[str] = None,
+                     font_size: int = 24,
+                     font_color: str = "white",
+                     outline_color: str = "black",
+                     position: str = "bottom") -> str:
+        """
+        将SRT字幕烧录到视频中（硬编码字幕）
+        
+        Args:
+            video_path: 视频文件路径
+            subtitle_path: SRT字幕文件路径
+            output_path: 输出视频文件路径，如果为None则自动生成
+            font_size: 字体大小（默认: 24）
+            font_color: 字体颜色（默认: white）
+            outline_color: 描边颜色（默认: black）
+            position: 字幕位置（top, center, bottom，默认: bottom）
+            
+        Returns:
+            输出视频文件路径
+        """
+        video_path = Path(video_path)
+        subtitle_path = Path(subtitle_path)
+        
+        if not video_path.exists():
+            raise FileNotFoundError(f"视频文件不存在: {video_path}")
+        if not subtitle_path.exists():
+            raise FileNotFoundError(f"字幕文件不存在: {subtitle_path}")
+        
+        if output_path is None:
+            output_path = self.output_dir / f"{video_path.stem}_with_subtitle.mp4"
+        else:
+            output_path = Path(output_path)
+        
+        try:
+            logger.info(f"开始将字幕烧录到视频: {video_path.name}")
+            logger.info(f"字幕文件: {subtitle_path.name}")
+            
+            # 获取支持中文的字体
+            font_path = self._get_chinese_font()
+            
+            # ASS/SSA 字幕对齐方式 (numpad 布局)
+            # 1=左下, 2=中下, 3=右下
+            # 4=左中, 5=正中, 6=右中  
+            # 7=左上, 8=中上, 9=右上
+            alignment_map = {
+                "top": "8",      # 中上
+                "center": "5",   # 正中
+                "bottom": "2"    # 中下（底部居中）
+            }
+            alignment = alignment_map.get(position, "2")
+            
+            # 设置垂直边距（MarginV）- 底部时设置很小以贴近底边
+            margin_v = 10 if position == "bottom" else 20
+            
+            # 使用 ffmpeg 烧录字幕
+            video_input = ffmpeg.input(str(video_path))
+            
+            # 构建字幕样式字符串
+            # ASS 颜色格式: &HAABBGGRR (AA=透明度, BB=蓝, GG=绿, RR=红)
+            # 白色: &H00FFFFFF (不透明白色)
+            # 黑色: &H00000000 (不透明黑色)
+            # 半透明黑色背景: &H80000000 (50%透明度黑色)
+            #
+            # BorderStyle: 
+            #   1 = 描边 + 阴影
+            #   3 = 不透明背景框
+            #   4 = 不透明背景框（带阴影）
+            #
+            # 使用 BorderStyle=4 可以获得黑色高光背景效果
+            force_style = (
+                f"FontName={font_path},"        # 中文字体
+                f"FontSize={font_size},"        # 字体大小
+                f"PrimaryColour=&H00FFFFFF,"    # 白色字体（不透明）
+                f"SecondaryColour=&H00FFFFFF,"  # 次要颜色（白色）
+                f"OutlineColour=&H00000000,"    # 黑色描边
+                f"BackColour=&H80000000,"       # 半透明黑色背景
+                f"Bold=1,"                      # 加粗
+                f"BorderStyle=4,"               # 不透明背景框带阴影
+                f"Outline=2,"                   # 描边宽度
+                f"Shadow=1,"                    # 阴影深度
+                f"Alignment={alignment},"       # 底部居中
+                f"MarginL=20,"                  # 左边距
+                f"MarginR=20,"                  # 右边距
+                f"MarginV={margin_v}"           # 垂直边距（贴近底部）
+            )
+            
+            logger.info(f"字幕样式: 白色字体 + 黑色高光背景, 位置: {position}")
+            
+            # 应用字幕滤镜
+            video_stream = video_input['v']
+            video_stream = video_stream.filter(
+                'subtitles',
+                str(subtitle_path),
+                force_style=force_style
+            )
+            
+            # 输出视频
+            output = ffmpeg.output(
+                video_stream,
+                video_input['a'],
+                str(output_path),
+                vcodec=self.settings.video_codec,
+                acodec='copy',  # 音频流复制，不重新编码
+                preset=self.settings.video_preset,
+                crf=self.settings.video_crf,
+                movflags='faststart'
+            )
+            
+            ffmpeg.run(output, overwrite_output=True, quiet=True)
+            
+            logger.info(f"✓ 字幕烧录完成: {output_path}")
+            return str(output_path)
+            
+        except ffmpeg.Error as e:
+            error_msg = e.stderr.decode() if e.stderr else str(e)
+            logger.error(f"烧录字幕时出错: {error_msg}")
+            raise
+        except Exception as e:
+            logger.error(f"烧录字幕时出错: {str(e)}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            raise
+    
+    def burn_subtitle_simple(self, video_path: str, subtitle_path: str,
+                            output_path: Optional[str] = None) -> str:
+        """
+        将SRT字幕烧录到视频中（简化版本，使用默认样式）
+        
+        Args:
+            video_path: 视频文件路径
+            subtitle_path: SRT字幕文件路径
+            output_path: 输出视频文件路径，如果为None则自动生成
+            
+        Returns:
+            输出视频文件路径
+        """
+        return self.burn_subtitle(video_path, subtitle_path, output_path)
 
