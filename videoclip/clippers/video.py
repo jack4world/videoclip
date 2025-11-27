@@ -18,6 +18,47 @@ from videoclip.config.constants import PATTERN_CLIP_SUBTITLE_JSON, PATTERN_CLIP_
 
 logger = get_logger(__name__)
 
+# 常见的语音识别错误修正字典
+# 键为错误识别的文本，值为正确的文本
+SPEECH_RECOGNITION_FIXES = {
+    # 技术术语
+    'call chips': 'cool chips',
+    'cool chips': 'cool chips',  # 保持正确的不变
+    'tarot wait': 'terawatt',
+    'tarot watt': 'terawatt',
+    'terra watt': 'terawatt',
+    'car to ship': 'Kardashev',
+    'card a shove': 'Kardashev',
+    'car to shove': 'Kardashev',
+    # 人名和书名
+    'in banks, culture books': "Iain Banks' Culture books",
+    'in banks culture books': "Iain Banks' Culture books",
+    'ian banks': 'Iain Banks',
+    'in banks': 'Iain Banks',
+    # 其他常见错误
+    'giga watt': 'gigawatt',
+    'mega watt': 'megawatt',
+    'kilo watt': 'kilowatt',
+}
+
+
+def fix_speech_recognition_errors(text: str) -> str:
+    """
+    修正常见的语音识别错误
+    
+    Args:
+        text: 原始文本
+        
+    Returns:
+        修正后的文本
+    """
+    result = text
+    for wrong, correct in SPEECH_RECOGNITION_FIXES.items():
+        # 不区分大小写的替换
+        pattern = re.compile(re.escape(wrong), re.IGNORECASE)
+        result = pattern.sub(correct, result)
+    return result
+
 
 class VideoClipper:
     """视频裁剪器"""
@@ -159,17 +200,26 @@ class VideoClipper:
                 logger.warning("未配置 API Key，跳过翻译")
             return (text, "")
         
+        # 先用规则修正常见的语音识别错误
+        text = fix_speech_recognition_errors(text)
+        
         try:
-            prompt = f"""请对以下英文文本进行处理，要求：
-1. 首先检查并修正文本中的明显错别字和拼写错误
-2. 然后将修正后的英文文本翻译成中文
-3. 保持原意准确，语言自然流畅
-4. 返回格式：第一行是"修正后的英文："，第二行是修正后的英文文本，第三行是"中文翻译："，第四行是中文翻译
+            prompt = f"""请严格按照以下要求处理英文文本（这是视频字幕，可能不完整）：
 
-英文文本：
-{text}
+【重要】只做两件事：
+1. 修正明显的语音识别错误（如 "call chips"→"cool chips", "tarot watt"→"terawatt"）
+2. 将文本翻译成中文
 
-请按照上述格式返回结果："""
+【禁止】
+- 不要添加任何原文中没有的内容
+- 不要扩展、解释或补充不完整的句子
+- 如果原文只有几个词或不完整，翻译也必须同样简短
+
+返回格式（严格遵守）：
+修正后的英文：[只包含修正后的原文，不多不少]
+中文翻译：[简洁的翻译，长度与原文相当]
+
+英文文本：{text}"""
             
             result = Generation.call(
                 model=self.settings.qwen_model,
@@ -228,6 +278,23 @@ class VideoClipper:
         corrected_english = original_text
         chinese_translation = ""
         
+        # 首先尝试处理单行格式：修正后的英文：xxx 中文翻译：xxx
+        if '修正后的英文：' in content and '中文翻译：' in content:
+            # 提取英文部分
+            english_start = content.find('修正后的英文：') + len('修正后的英文：')
+            chinese_marker_pos = content.find('中文翻译：')
+            if english_start < chinese_marker_pos:
+                corrected_english = content[english_start:chinese_marker_pos].strip()
+            
+            # 提取中文部分
+            chinese_start = chinese_marker_pos + len('中文翻译：')
+            chinese_translation = content[chinese_start:].strip()
+            
+            # 清理可能的多余内容
+            if corrected_english and chinese_translation:
+                return (corrected_english, chinese_translation)
+        
+        # 多行格式处理
         lines = content.split('\n')
         current_section = None
         
@@ -237,11 +304,23 @@ class VideoClipper:
                 continue
             
             # 检测章节标记
-            if any(marker in line for marker in ['修正后的英文', 'Corrected English', '英文：', '英文:']):
+            if any(marker in line for marker in ['修正后的英文', 'Corrected English']):
                 current_section = 'english'
+                # 如果标记后面直接跟着内容（如 "修正后的英文：xxx"）
+                for marker in ['修正后的英文：', '修正后的英文:']:
+                    if marker in line:
+                        rest = line.split(marker, 1)[1].strip()
+                        if rest and '中文翻译' not in rest:
+                            corrected_english = rest
                 continue
-            elif any(marker in line for marker in ['中文翻译', 'Chinese Translation', '中文：', '中文:']):
+            elif any(marker in line for marker in ['中文翻译', 'Chinese Translation']):
                 current_section = 'chinese'
+                # 如果标记后面直接跟着内容
+                for marker in ['中文翻译：', '中文翻译:']:
+                    if marker in line:
+                        rest = line.split(marker, 1)[1].strip()
+                        if rest:
+                            chinese_translation = rest
                 continue
             
             # 根据章节提取内容
@@ -264,9 +343,12 @@ class VideoClipper:
                 line_stripped = line.strip()
                 if not line_stripped:
                     continue
+                # 跳过包含标记的行
+                if any(keyword in line_stripped for keyword in ['修正后的英文', '中文翻译', 'Corrected', 'Translation']):
+                    continue
                 if any('\u4e00' <= char <= '\u9fff' for char in line_stripped):
                     chinese_lines.append(line_stripped)
-                elif line_stripped and not any(keyword in line_stripped for keyword in ['修正', '中文', '翻译', 'Corrected', 'Translation']):
+                else:
                     english_lines.append(line_stripped)
             
             if chinese_lines:
@@ -360,9 +442,148 @@ class VideoClipper:
         
         return lines if lines else [text]
     
+    def wrap_text(self, text: str, max_width: int = 45) -> str:
+        """
+        对长文本进行换行处理
+        
+        Args:
+            text: 原始文本
+            max_width: 每行最大字符宽度（中文字符算2个宽度）
+            
+        Returns:
+            换行后的文本
+        """
+        if self.calculate_text_width(text) <= max_width:
+            return text
+        
+        lines = []
+        words = text.split(' ')
+        current_line = ""
+        
+        for word in words:
+            test_line = f"{current_line} {word}".strip() if current_line else word
+            if self.calculate_text_width(test_line) <= max_width:
+                current_line = test_line
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+        
+        if current_line:
+            lines.append(current_line)
+        
+        return '\n'.join(lines) if lines else text
+    
+    def wrap_chinese_text(self, text: str, max_chars: int = 22) -> str:
+        """
+        对中文长文本进行换行处理
+        
+        Args:
+            text: 原始中文文本
+            max_chars: 每行最大字符数
+            
+        Returns:
+            换行后的文本
+        """
+        if len(text) <= max_chars:
+            return text
+        
+        lines = []
+        current_line = ""
+        
+        for char in text:
+            if len(current_line) >= max_chars:
+                # 尝试在标点符号处断行
+                break_pos = -1
+                for i, c in enumerate(reversed(current_line)):
+                    if c in '，。、；：！？':
+                        break_pos = len(current_line) - i
+                        break
+                
+                if break_pos > len(current_line) // 2:
+                    lines.append(current_line[:break_pos])
+                    current_line = current_line[break_pos:]
+                else:
+                    lines.append(current_line)
+                    current_line = ""
+            
+            current_line += char
+        
+        if current_line:
+            lines.append(current_line)
+        
+        return '\n'.join(lines) if lines else text
+    
+    def _split_long_segment(self, english_text: str, chinese_text: str, 
+                             start: float, end: float, max_lines: int = 2) -> List[Dict]:
+        """
+        将长文本段落分割成多个子段落，每个子段落最多显示指定行数
+        
+        Args:
+            english_text: 英文文本
+            chinese_text: 中文文本
+            start: 开始时间
+            end: 结束时间
+            max_lines: 每个子段落最大行数
+            
+        Returns:
+            分割后的子段落列表
+        """
+        duration = end - start
+        
+        # 将英文按句子分割（在句号、问号、感叹号处）
+        import re
+        sentences = re.split(r'(?<=[.!?])\s+', english_text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        if len(sentences) <= 1:
+            # 无法按句子分割，按词分割
+            words = english_text.split()
+            mid = len(words) // 2
+            sentences = [' '.join(words[:mid]), ' '.join(words[mid:])]
+        
+        # 计算每个句子的字符权重
+        total_chars = sum(len(s) for s in sentences)
+        
+        # 创建子段落
+        sub_segments = []
+        current_time = start
+        
+        for i, sentence in enumerate(sentences):
+            # 按字符比例分配时间
+            char_ratio = len(sentence) / total_chars if total_chars > 0 else 1 / len(sentences)
+            segment_duration = duration * char_ratio
+            segment_end = min(current_time + segment_duration, end)
+            
+            # 对应的中文部分（简单按比例分割）
+            if chinese_text:
+                chinese_start_idx = int(len(chinese_text) * (current_time - start) / duration)
+                chinese_end_idx = int(len(chinese_text) * (segment_end - start) / duration)
+                chinese_part = chinese_text[chinese_start_idx:chinese_end_idx]
+                # 尝试在标点处断开
+                for punct in '。！？，、；：':
+                    last_punct = chinese_part.rfind(punct)
+                    if last_punct > len(chinese_part) // 2:
+                        chinese_part = chinese_part[:last_punct + 1]
+                        break
+            else:
+                chinese_part = ""
+            
+            sub_segments.append({
+                'english': sentence,
+                'chinese': chinese_part,
+                'start': current_time,
+                'end': segment_end
+            })
+            
+            current_time = segment_end
+        
+        return sub_segments
+    
     def save_subtitle_srt(self, subtitle_data: Dict, output_path: Path):
         """
-        将字幕数据保存为 SRT 格式（中英文双语，每个时间戳段落12-15个字符）
+        将字幕数据保存为 SRT 格式（中英文双语，保留原始时间戳）
+        智能分割长段落，每个字幕最多显示2行英文+2行中文
         
         Args:
             subtitle_data: 字幕数据
@@ -378,6 +599,13 @@ class VideoClipper:
             millis = int((seconds % 1) * 1000)
             return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
         
+        # 判断文本是否需要分割（超过2行）
+        def needs_split(text: str, max_width: int = 65) -> bool:
+            if not text:
+                return False
+            wrapped = self.wrap_text(text, max_width)
+            return wrapped.count('\n') >= 2  # 超过2行需要分割
+        
         with open(output_path, 'w', encoding='utf-8') as f:
             subtitle_index = 1
             total_segments = len(segments)
@@ -388,6 +616,7 @@ class VideoClipper:
                 start = seg.get("start", 0)
                 end = seg.get("end", 0)
                 text = seg.get("text", "").strip()
+                duration = end - start
                 
                 if not text:
                     continue
@@ -406,42 +635,32 @@ class VideoClipper:
                     if idx == 1:
                         logger.warning("未配置 API Key，仅生成英文字幕（不进行错别字修正）")
                 
-                # 将文本分割成每段12-15个字符的片段
-                english_chunks = self.split_text_by_length(english_text)
-                chinese_chunks = self.split_text_by_length(chinese_text) if chinese_text else []
-                
-                # 计算每个片段的时间分配（按文本长度比例）
-                total_duration = end - start
-                total_english_chars = sum(self.calculate_text_width(chunk) for chunk in english_chunks)
-                
-                # 为每个片段创建独立的时间戳段落
-                current_time = start
-                for chunk_idx, english_chunk in enumerate(english_chunks):
-                    # 计算这个片段应该占用的时间（按字符数比例）
-                    chunk_chars = self.calculate_text_width(english_chunk)
-                    if total_english_chars > 0:
-                        chunk_duration = total_duration * (chunk_chars / total_english_chars)
-                    else:
-                        chunk_duration = total_duration / len(english_chunks) if english_chunks else total_duration
+                # 判断是否需要分割：时间跨度>=5秒且文本超过2行
+                if duration >= 5.0 and needs_split(english_text):
+                    # 分割长段落
+                    sub_segments = self._split_long_segment(english_text, chinese_text, start, end)
                     
-                    chunk_start = current_time
-                    chunk_end = min(current_time + chunk_duration, end)
-                    current_time = chunk_end
+                    for sub_seg in sub_segments:
+                        english_wrapped = self.wrap_text(sub_seg['english'], max_width=65)
+                        chinese_wrapped = self.wrap_chinese_text(sub_seg['chinese'], max_chars=35) if sub_seg['chinese'] else ""
+                        
+                        f.write(f"{subtitle_index}\n")
+                        f.write(f"{format_timestamp(sub_seg['start'])} --> {format_timestamp(sub_seg['end'])}\n")
+                        f.write(f"{english_wrapped}\n")
+                        if chinese_wrapped:
+                            f.write(f"{chinese_wrapped}\n")
+                        f.write("\n")
+                        subtitle_index += 1
+                else:
+                    # 短段落直接换行显示
+                    english_wrapped = self.wrap_text(english_text, max_width=65)
+                    chinese_wrapped = self.wrap_chinese_text(chinese_text, max_chars=35) if chinese_text else ""
                     
-                    # 获取对应的中文片段（如果有）
-                    chinese_chunk = chinese_chunks[chunk_idx] if chunk_idx < len(chinese_chunks) else ""
-                    
-                    # 写入 SRT 格式
                     f.write(f"{subtitle_index}\n")
-                    f.write(f"{format_timestamp(chunk_start)} --> {format_timestamp(chunk_end)}\n")
-                    
-                    # 写入英文文本（单个片段，12-15字符）
-                    f.write(f"{english_chunk}\n")
-                    
-                    # 写入中文文本（如果有）
-                    if chinese_chunk:
-                        f.write(f"{chinese_chunk}\n")
-                    
+                    f.write(f"{format_timestamp(start)} --> {format_timestamp(end)}\n")
+                    f.write(f"{english_wrapped}\n")
+                    if chinese_wrapped:
+                        f.write(f"{chinese_wrapped}\n")
                     f.write("\n")
                     subtitle_index += 1
             
@@ -577,7 +796,7 @@ class VideoClipper:
     
     def burn_subtitle(self, video_path: str, subtitle_path: str, 
                      output_path: Optional[str] = None,
-                     font_size: int = 24,
+                     font_size: int = 18,
                      font_color: str = "white",
                      outline_color: str = "black",
                      position: str = "bottom") -> str:

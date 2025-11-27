@@ -64,6 +64,7 @@ class VideoClipProcessor:
             # 步骤 1: 获取视频文件（下载或使用已有文件）
             step_num = 1
             total_steps = 5
+            youtube_subtitle_path = None  # YouTube 下载的字幕
             
             if video_path:
                 # 使用已提供的视频文件
@@ -76,24 +77,44 @@ class VideoClipProcessor:
                 logger.info(f"\n[步骤 {step_num}/{total_steps}] 使用已提供的视频文件...")
                 logger.info(f"✓ 视频文件: {video_path}\n")
             elif youtube_url:
-                # 下载 YouTube 视频
-                logger.info(f"\n[步骤 {step_num}/{total_steps}] 下载 YouTube 视频...")
-                video_path = self.downloader.download(youtube_url)
-                logger.info(f"✓ 视频下载完成: {video_path}\n")
+                # 下载 YouTube 视频和字幕
+                logger.info(f"\n[步骤 {step_num}/{total_steps}] 下载 YouTube 视频和字幕...")
+                download_result = self.downloader.download(youtube_url, download_subtitles=True)
+                video_path = download_result['video_path']
+                youtube_subtitle_path = download_result.get('subtitle_path')
+                logger.info(f"✓ 视频下载完成: {video_path}")
+                if youtube_subtitle_path:
+                    logger.info(f"✓ 字幕下载完成: {youtube_subtitle_path} (语言: {download_result.get('subtitle_lang')})\n")
+                else:
+                    logger.info("⚠ 未找到可用的 YouTube 字幕\n")
             else:
                 raise ValueError("必须提供 --url 或 --video 参数之一")
             
-            # 步骤 2: 提取音频
+            # 步骤 2: 提取音频（仅在需要 Whisper 识别时必需）
             step_num += 1
-            logger.info(f"[步骤 {step_num}/{total_steps}] 提取音频...")
-            audio_path = self.audio_extractor.extract(video_path)
-            logger.info(f"✓ 音频提取完成: {audio_path}\n")
+            audio_path = None
+            if not youtube_subtitle_path:
+                logger.info(f"[步骤 {step_num}/{total_steps}] 提取音频...")
+                audio_path = self.audio_extractor.extract(video_path)
+                logger.info(f"✓ 音频提取完成: {audio_path}\n")
+            else:
+                logger.info(f"[步骤 {step_num}/{total_steps}] 跳过音频提取（使用 YouTube 字幕）\n")
             
-            # 步骤 3: 提取字幕和时间戳
+            # 步骤 3: 获取字幕（优先使用 YouTube 字幕，否则用 Whisper）
             step_num += 1
-            logger.info(f"[步骤 {step_num}/{total_steps}] 提取字幕和时间戳...")
-            subtitle_path = self.subtitle_extractor.extract(audio_path)
-            logger.info(f"✓ 字幕提取完成: {subtitle_path}\n")
+            if youtube_subtitle_path:
+                logger.info(f"[步骤 {step_num}/{total_steps}] 转换 YouTube 字幕格式...")
+                # 转换 YouTube 字幕为标准 JSON 格式
+                subtitle_json_path = self.audio_dir / (Path(video_path).stem + "_subtitles.json")
+                subtitle_path = self.downloader.convert_youtube_subtitle_to_json(
+                    youtube_subtitle_path, 
+                    str(subtitle_json_path)
+                )
+                logger.info(f"✓ 字幕转换完成: {subtitle_path} (来源: YouTube)\n")
+            else:
+                logger.info(f"[步骤 {step_num}/{total_steps}] 使用 Whisper 提取字幕...")
+                subtitle_path = self.subtitle_extractor.extract(audio_path)
+                logger.info(f"✓ 字幕提取完成: {subtitle_path} (来源: Whisper)\n")
             
             # 步骤 4: 分析精彩内容
             step_num += 1
